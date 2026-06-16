@@ -27,6 +27,12 @@ struct TrtContextOpaque {
     int                                chunkLen   = 0;
     int                                numSources = 0;
 
+    TrtContextOpaque()                                    = default;
+    TrtContextOpaque(const TrtContextOpaque &)            = delete;
+    TrtContextOpaque &operator=(const TrtContextOpaque &) = delete;
+    TrtContextOpaque(TrtContextOpaque &&)                 = delete;
+    TrtContextOpaque &operator=(TrtContextOpaque &&)      = delete;
+
     ~TrtContextOpaque() {
         if (d_input) cudaFree(d_input);
         if (d_output) cudaFree(d_output);
@@ -140,7 +146,9 @@ void Trt_Sync(TrtContextOpaque *hCtx) {
 
 auto Trt_AllocPinned(size_t size) -> void * {
     void *ptr = nullptr;
-    cudaMallocHost(&ptr, size);
+    if (cudaMallocHost(&ptr, size) != cudaSuccess) {
+        throw std::bad_alloc();
+    }
     return ptr;
 }
 
