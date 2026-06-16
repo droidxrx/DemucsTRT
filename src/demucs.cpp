@@ -65,12 +65,12 @@ auto RunInferenceStreaming(TrtContextOpaque *ctx, Config *cfg, int chunkLen, int
         outBuf[i].reset(static_cast<float *>(Trt_AllocPinned(maxOutBytes)));
     }
 
-    std::vector<std::vector<float>> overlapHistL(numSources, std::vector<float>(overlapFrames, 0.0f));
-    std::vector<std::vector<float>> overlapHistR(numSources, std::vector<float>(overlapFrames, 0.0f));
-    std::vector<std::vector<float>> readyL_pool(numSources, std::vector<float>(chunkLen));
-    std::vector<std::vector<float>> readyR_pool(numSources, std::vector<float>(chunkLen));
-    std::vector<float>              chunkL(chunkLen, 0.0f);
-    std::vector<float>              chunkR(chunkLen, 0.0f);
+    std::vector<float> overlapHistL(numSources * overlapFrames, 0.0f);
+    std::vector<float> overlapHistR(numSources * overlapFrames, 0.0f);
+    std::vector<float> readyL_pool(numSources * chunkLen);
+    std::vector<float> readyR_pool(numSources * chunkLen);
+    std::vector<float> chunkL(chunkLen, 0.0f);
+    std::vector<float> chunkR(chunkLen, 0.0f);
 
     struct ChunkMeta {
         int   validSamples    = 0;
@@ -88,10 +88,11 @@ auto RunInferenceStreaming(TrtContextOpaque *ctx, Config *cfg, int chunkLen, int
     meta[0].chunks.resize(maxBatch);
     meta[1].chunks.resize(maxBatch);
 
-    bool hasMoreData    = true;
-    bool gpuRunning     = false;
-    int  batchIdx       = 0;
-    int  globalChunkIdx = 0;
+    bool hasMoreData      = true;
+    bool gpuRunning       = false;
+    bool hadPreviousBatch = false;
+    int  batchIdx         = 0;
+    int  globalChunkIdx   = 0;
 
     while (hasMoreData || gpuRunning) {
         int activeIdx  = batchIdx % 2;
@@ -143,8 +144,30 @@ auto RunInferenceStreaming(TrtContextOpaque *ctx, Config *cfg, int chunkLen, int
 
         if (gpuRunning) {
             Trt_Sync(ctx);
-            gpuRunning = false;
+            gpuRunning       = false;
+            hadPreviousBatch = true;
+        }
 
+        bool launchedNext = false;
+        if (hasMoreData && meta[activeIdx].valid) {
+            int runBatchSize = meta[activeIdx].numChunks;
+
+            if (!isDynamic && runBatchSize < maxBatch) {
+                size_t paddingStartOffset = runBatchSize * 2 * chunkLen;
+                size_t paddingBytes       = (maxBatch - runBatchSize) * 2 * chunkLen * sizeof(float);
+                std::memset(inBuf[activeIdx].get() + paddingStartOffset, 0, paddingBytes);
+                runBatchSize = maxBatch;
+            }
+
+            int status = Trt_Process(ctx, inBuf[activeIdx].get(), outBuf[activeIdx].get(), runBatchSize);
+            if (status != 0) {
+                std::cerr << "\n[Error] Trt_Process failed with code: " << status << "\n";
+                return false;
+            }
+            launchedNext = true;
+        }
+
+        if (hadPreviousBatch) {
             auto  &m   = meta[processIdx];
             float *out = outBuf[processIdx].get();
 
@@ -153,15 +176,12 @@ auto RunInferenceStreaming(TrtContextOpaque *ctx, Config *cfg, int chunkLen, int
                 int   outOffsetBatch = b * numSources * 2 * chunkLen;
 
                 for (int s = 0; s < numSources; s++) {
-                    auto &readyL = readyL_pool[s];
-                    auto &readyR = readyR_pool[s];
-
-                    // [OPTIMIZATION: REMOVED] Remove readyL.resize() and readyR.resize()!
-                    // The capacity is already declared full (chunkLen) at the start of allocation.
-                    // readyL.resize(cm.samplesAdvanced);
-                    // readyR.resize(cm.samplesAdvanced);
-
                     int srcOffset = outOffsetBatch + s * 2 * chunkLen;
+
+                    float *readyL = readyL_pool.data() + (s * chunkLen);
+                    float *readyR = readyR_pool.data() + (s * chunkLen);
+                    float *histL  = overlapHistL.data() + (s * overlapFrames);
+                    float *histR  = overlapHistR.data() + (s * overlapFrames);
 
                     for (int t = 0; t < chunkLen; t++) {
                         float valL = (out[srcOffset + t] * cm.stdDev) + cm.mean;
@@ -184,8 +204,8 @@ auto RunInferenceStreaming(TrtContextOpaque *ctx, Config *cfg, int chunkLen, int
                                 }
                             } else {
                                 if (t < cm.samplesAdvanced) {
-                                    readyL[t] = valL + overlapHistL[s][t];
-                                    readyR[t] = valR + overlapHistR[s][t];
+                                    readyL[t] = valL + histL[t];
+                                    readyR[t] = valR + histR[t];
                                 }
                             }
                         } else if (t < hopLen) {
@@ -194,31 +214,14 @@ auto RunInferenceStreaming(TrtContextOpaque *ctx, Config *cfg, int chunkLen, int
                                 readyR[t] = valR;
                             }
                         } else {
-                            overlapHistL[s][t - hopLen] = valL;
-                            overlapHistR[s][t - hopLen] = valR;
+                            histL[t - hopLen] = valL;
+                            histR[t - hopLen] = valR;
                         }
                     }
-                    if (writers[s]) writers[s]->Write(readyL.data(), readyR.data(), cm.samplesAdvanced);
+                    if (writers[s]) writers[s]->Write(readyL, readyR, cm.samplesAdvanced);
                 }
             }
-        }
-
-        if (hasMoreData && meta[activeIdx].valid) {
-            int runBatchSize = meta[activeIdx].numChunks;
-
-            if (!isDynamic && runBatchSize < maxBatch) {
-                size_t paddingStartOffset = runBatchSize * 2 * chunkLen;
-                size_t paddingBytes       = (maxBatch - runBatchSize) * 2 * chunkLen * sizeof(float);
-                std::memset(inBuf[activeIdx].get() + paddingStartOffset, 0, paddingBytes);
-                runBatchSize = maxBatch;
-            }
-
-            int status = Trt_Process(ctx, inBuf[activeIdx].get(), outBuf[activeIdx].get(), runBatchSize);
-            if (status != 0) {
-                std::cerr << "\n[Error] Trt_Process failed with code: " << status << "\n";
-                return false;
-            }
-            gpuRunning = true;
+            hadPreviousBatch = false;
         }
 
         if (totalSamples > 0 && (batchIdx % 5 == 0 || !hasMoreData)) {
@@ -226,6 +229,7 @@ auto RunInferenceStreaming(TrtContextOpaque *ctx, Config *cfg, int chunkLen, int
             std::cout << "\r  + Separating... " << pct << "%" << std::flush;
         }
 
+        gpuRunning = launchedNext;
         batchIdx++;
     }
 

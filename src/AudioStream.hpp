@@ -13,26 +13,21 @@
 
 class AudioRingBuffer {
 public:
-    explicit AudioRingBuffer(size_t initial_capacity = 8192) {
-        buffer_.resize(initial_capacity);
-        head_ = 0;
-        tail_ = 0;
-        size_ = 0;
-    }
+    explicit AudioRingBuffer(size_t initial_capacity = 8192) : buffer_data_(new float[initial_capacity]), buffer_capacity_(initial_capacity) {}
 
     void Push(const float *data, size_t len) {
-        if (size_ + len > buffer_.size()) {
-            Resize(std::max(buffer_.size() * 2, size_ + len));
+        if (size_ + len > buffer_capacity_) {
+            Resize(std::max(buffer_capacity_ * 2, size_ + len));
         }
 
-        size_t right_space = buffer_.size() - tail_;
+        size_t right_space = buffer_capacity_ - tail_;
         if (len <= right_space) {
-            std::memcpy(buffer_.data() + tail_, data, len * sizeof(float));
+            std::memcpy(buffer_data_.get() + tail_, data, len * sizeof(float));
         } else {
-            std::memcpy(buffer_.data() + tail_, data, right_space * sizeof(float));
-            std::memcpy(buffer_.data(), data + right_space, (len - right_space) * sizeof(float));
+            std::memcpy(buffer_data_.get() + tail_, data, right_space * sizeof(float));
+            std::memcpy(buffer_data_.get(), data + right_space, (len - right_space) * sizeof(float));
         }
-        tail_ = (tail_ + len) % buffer_.size();
+        tail_ = (tail_ + len) % buffer_capacity_;
         size_ += len;
     }
 
@@ -40,18 +35,18 @@ public:
         if (len > size_) len = size_;
         if (len == 0) return;
 
-        size_t right_part = buffer_.size() - head_;
+        size_t right_part = buffer_capacity_ - head_;
         if (len <= right_part) {
-            std::memcpy(dest, buffer_.data() + head_, len * sizeof(float));
+            std::memcpy(dest, buffer_data_.get() + head_, len * sizeof(float));
         } else {
-            std::memcpy(dest, buffer_.data() + head_, right_part * sizeof(float));
-            std::memcpy(dest + right_part, buffer_.data(), (len - right_part) * sizeof(float));
+            std::memcpy(dest, buffer_data_.get() + head_, right_part * sizeof(float));
+            std::memcpy(dest + right_part, buffer_data_.get(), (len - right_part) * sizeof(float));
         }
     }
 
     void Consume(size_t len) {
         if (len > size_) len = size_;
-        head_ = (head_ + len) % buffer_.size();
+        head_ = (head_ + len) % buffer_capacity_;
         size_ -= len;
     }
 
@@ -60,25 +55,29 @@ public:
 
 private:
     void Resize(size_t new_capacity) {
-        std::vector<float> new_buf(new_capacity);
+        std::unique_ptr<float[]> new_buf(new float[new_capacity]);
+
         if (size_ > 0) {
-            size_t right_part = buffer_.size() - head_;
+            size_t right_part = buffer_capacity_ - head_;
             if (size_ <= right_part) {
-                std::memcpy(new_buf.data(), buffer_.data() + head_, size_ * sizeof(float));
+                std::memcpy(new_buf.get(), buffer_data_.get() + head_, size_ * sizeof(float));
             } else {
-                std::memcpy(new_buf.data(), buffer_.data() + head_, right_part * sizeof(float));
-                std::memcpy(new_buf.data() + right_part, buffer_.data(), (size_ - right_part) * sizeof(float));
+                std::memcpy(new_buf.get(), buffer_data_.get() + head_, right_part * sizeof(float));
+                std::memcpy(new_buf.get() + right_part, buffer_data_.get(), (size_ - right_part) * sizeof(float));
             }
         }
-        buffer_ = std::move(new_buf);
-        head_   = 0;
-        tail_   = size_ % buffer_.size();
+
+        buffer_data_     = std::move(new_buf);
+        buffer_capacity_ = new_capacity;
+        head_            = 0;
+        tail_            = size_ % buffer_capacity_;
     }
 
-    std::vector<float> buffer_;
-    size_t             head_;
-    size_t             tail_;
-    size_t             size_;
+    std::unique_ptr<float[]> buffer_data_;
+    size_t                   buffer_capacity_;
+    size_t                   head_ = 0;
+    size_t                   tail_ = 0;
+    size_t                   size_ = 0;
 };
 
 class AudioStreamReader {
