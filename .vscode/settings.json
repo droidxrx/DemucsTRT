@@ -1,0 +1,13 @@
+{
+	"clangd.arguments": [
+		"--background-index",
+		"--pch-storage=memory",
+		"--header-insertion=never",
+		"--pretty",
+		"--clang-tidy",
+		"--completion-style=detailed",
+		"--compile-commands-dir=${workspaceFolder}/build"
+	],
+	"clangd.enable": true,
+	"cmake.generator": "Ninja"
+}

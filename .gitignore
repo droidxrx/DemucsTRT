@@ -1,0 +1,15 @@
+.env
+
+.idea
+
+build
+dist
+models
+stems
+
+*.mp4
+*.wav
+*.aac
+*.mp3
+*.pcm
+*.m4a
